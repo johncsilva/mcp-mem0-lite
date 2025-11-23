@@ -1,10 +1,7 @@
 {
   "mcpServers": {
     "mem0-lite": {
-      "command": "C:\\Dev\\mcp-mem0-lite\\.venv\\Scripts\\python.exe",
-      "args": [
-        "C:\\Dev\\mcp-mem0-lite\\server.py"
-      ]
+      "command": "/home/john/projetos/Pessoal/mcp-mem0-lite/mcp-mem0-lite-global.sh"
     }
   }
 }

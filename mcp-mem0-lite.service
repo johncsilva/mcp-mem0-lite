@@ -1,0 +1,16 @@
+[Unit]
+Description=MCP Mem0-Lite Server
+After=network.target ollama.service
+Wants=ollama.service
+
+[Service]
+Type=simple
+User=john
+WorkingDirectory=/home/john/projetos/Pessoal/mcp-mem0-lite
+ExecStart=/home/john/projetos/Pessoal/mcp-mem0-lite/mcp-mem0-lite-global.sh
+Restart=always
+RestartSec=5
+Environment=PATH=/home/john/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target

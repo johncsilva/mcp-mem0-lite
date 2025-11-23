@@ -38,7 +38,7 @@ Servidor MCP (FastAPI + FastMCP + Mem0) com embeddings/LLM via Ollama ou OpenAI,
 5) Rodar:
    ```bash
    source .venv/bin/activate
-   python server.py
+   python3 server.py
    ```
 
 ## Smoke test rápido
@@ -114,6 +114,68 @@ curl -v http://127.0.0.1:8050/
 
 # Ver logs do servidor (na janela onde está rodando)
 ```
+# MCP Server como serviço do Windows (WinSW + WSL)
+
+Roda `python server.py` no WSL (distro `Ubuntu-24.04`) ativando o venv Linux `.venv`.
+
+## Arquivos
+- `run-mcp.bat`: chama o WSL e roda o servidor.
+- `mcpserver-service.xml`: configuração do WinSW (nome/id do serviço, logs, auto start).
+
+## Ajustes necessários
+1) Baixe o WinSW (release mais recente) de https://github.com/winsw/winsw/releases e coloque o `.exe` na mesma pasta destes arquivos, renomeando para `mcpserver-service.exe`.
+2) Edite caminhos:
+   - `run-mcp.bat`:
+     - `DISTRO=Ubuntu-24.04` (troque se o nome for diferente, veja com `wsl -l -q`).
+     - `APP=/home/john/projetos/Pessoal/mcp-mem0-lite` (ajuste se o projeto estiver em outro lugar).
+   - `mcpserver-service.xml`:
+     - `<arguments>/c "C:\Path\To\run-mcp.bat"</arguments>` → coloque o caminho Windows onde o `.bat` ficará.
+     - `<logpath>C:\Path\To\logs</logpath>` → crie essa pasta ou ajuste.
+3) (Opcional) Ajuste `<id>` e `<name>` no XML se quiser outro nome de serviço.
+
+## Instalar e testar
+No Prompt/PowerShell **como Administrador**, na pasta do `mcpserver-service.exe`:
+```bat
+mcpserver-service.exe install
+mcpserver-service.exe start
+mcpserver-service.exe status
+```
+Teste o servidor (ex.: `curl http://localhost:11434/api/tags` ou endpoint do MCP) para confirmar que subiu.
+
+## Parar, reiniciar, remover
+```bat
+mcpserver-service.exe stop
+mcpserver-service.exe restart
+mcpserver-service.exe uninstall
+```
+
+## Notas
+- O serviço chama `wsl -d <DISTRO> -- bash -lc "cd <APP> && source .venv/bin/activate && python server.py"`.
+- O Windows acessa `\\wsl$\\<DISTRO>` quando o WSL está ativo; geralmente o comando já acorda a distro. Se quiser garantir, crie uma tarefa simples no Agendador rodando `wsl -d <DISTRO> -- true` no boot.
+- Se mudar o caminho do projeto/venv, atualize o `.bat`. Se editar o XML, reinicie o serviço (`stop`/`start` ou `restart`).***
+
+# Para o Ollama no WSL iniciar com o Windows, use estes comandos/ajustes:
+
+- Garantir systemd ativo no WSL (faça uma vez, dentro do WSL):
+
+  sudo systemctl enable --now ollama
+  systemctl status ollama
+  No windows, se ainda não tiver a configuraçao, em /etc/wsl.conf: 
+  ```
+  [boot]
+    nsystemd=true
+  ```
+  depois wsl --shutdown no Windows, reabrir a distro. 
+- Fazer o WSL acordar no boot do Windows:
+    - Crie uma tarefa no Agendador (“Ao iniciar o computador”) com ação:
+      wsl -d Ubuntu-24.04 -- true
+      Isso apenas acorda a distro; o systemd sobe e o serviço ollama inicia porque está enabled.
+- Alternativa (mais explícito):
+      wsl -d Ubuntu-24.04 -- systemctl start ollama
+      como ação da tarefa.
+- Testar após reboot:
+    - Dentro do WSL: curl http://localhost:11434/api/tags
+    - Do Windows: curl http://localhost:11434/api/tags (porta 11434 deve responder).
 
 ## Integrar com OpenCode CLI (MCP)
 
@@ -204,5 +266,37 @@ gemini mcp list
 
 ✅ **Deve mostrar**: `mem0-lite` como `✓ Connected`.
 
-## Claude Desktop (Linux/WSL)
-Copie `claude_desktop_config.json` para `~/.config/Claude/claude_desktop_config.json` e reinicie o app. O comando deve apontar para `python` e o caminho do `server.py` no WSL.
+## Integrar com Claude Desktop (SSE)
+
+Claude Desktop pode se conectar ao servidor que já está rodando via SSE, compartilhando a mesma instância com Claude Code CLI.
+
+### Windows
+
+#### 1. Verificar se o servidor está rodando
+```powershell
+curl http://127.0.0.1:8050/mcp/sse
+```
+
+#### 2. Abrir arquivo de configuração
+```powershell
+notepad %APPDATA%\Claude\claude_desktop_config.json
+```
+
+#### 3. Adicionar configuração (SSE)
+```json
+{
+  "mcpServers": {
+    "mem0-lite": {
+      "command": "wsl",
+      "args": [
+        "bash",
+        "-c",
+        "npx -y mcp-remote@latest http://localhost:8050/mcp/sse"
+      ]
+    }
+  }
+}
+```
+
+#### 4. Reiniciar Claude Desktop
+Feche completamente o Claude Desktop e abra novamente.

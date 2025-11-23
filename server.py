@@ -32,6 +32,9 @@ EMBEDDING_DIMS = int(os.getenv("EMBEDDING_DIMS", "768"))
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 LLM_MODEL = os.getenv("LLM_MODEL", "llama3.1:8b")
 
+# Usuario padrao quando user_id nao for informado
+DEFAULT_USER_ID = os.getenv("DEFAULT_USER_ID") or os.getenv("USERNAME", "default")
+
 # --- Helper Functions (precisam estar antes dos tools) -----------------------
 
 def _merge_results_or(result_lists, limit: int = 5):
@@ -48,6 +51,11 @@ def _merge_results_or(result_lists, limit: int = 5):
     # ordena por score desc e corta em limit
     merged = sorted(keep.values(), key=lambda x: float(x.get("score", 0)), reverse=True)
     return merged[:limit]
+
+
+def _resolve_user_id(user_id: str | None) -> str:
+    """Retorna o user_id fornecido ou o padrao configurado."""
+    return user_id or DEFAULT_USER_ID
 
 
 def _flatten_metadata(meta: dict | None) -> dict | None:
@@ -128,7 +136,7 @@ def add_memory(
 
     Args:
         text: The content to store
-        user_id: User identifier for memory isolation (defaults to Windows username)
+        user_id: User identifier for memory isolation (defaults to DEFAULT_USER_ID env or USERNAME)
         tags: List of tags for categorization (stored as CSV in metadata)
         metadata: Additional metadata (lists are converted to CSV strings)
 
@@ -138,9 +146,7 @@ def add_memory(
     if mem0 is None:
         raise RuntimeError("Mem0 not initialized")
 
-    # Use Windows username if user_id not specified
-    if user_id is None:
-        user_id = os.getenv("USERNAME", "default")
+    user_id = _resolve_user_id(user_id)
 
     meta = _flatten_metadata(metadata) or {}
     if tags:
@@ -176,7 +182,7 @@ def search_memory(
 
     Args:
         query: Search query text
-        user_id: User identifier for memory isolation (defaults to Windows username)
+        user_id: User identifier for memory isolation (defaults to DEFAULT_USER_ID env or USERNAME)
         tags: List of tags for OR filtering (searches across all provided tags)
         filters: Additional metadata filters (e.g., {"priority": "should", "owner": "john"})
         limit: Maximum number of results to return
@@ -188,9 +194,7 @@ def search_memory(
     if mem0 is None:
         raise RuntimeError("Mem0 not initialized")
 
-    # Use Windows username if user_id not specified
-    if user_id is None:
-        user_id = os.getenv("USERNAME", "default")
+    user_id = _resolve_user_id(user_id)
 
     base_filters = filters.copy() if filters else {}
 
@@ -222,10 +226,10 @@ def search_memory(
 @mcp.tool()
 def list_memories(user_id: str | None = None, limit: int = 100, offset: int = 0) -> dict:
     """
-    Lists all memories for a specific user (defaults to Windows username).
+    Lists all memories for a specific user (defaults to DEFAULT_USER_ID env or USERNAME).
 
     Args:
-        user_id: User identifier (defaults to Windows username)
+        user_id: User identifier (defaults to DEFAULT_USER_ID env or USERNAME)
         limit: Maximum number of memories to return
         offset: Number of memories to skip (for pagination)
 
@@ -235,9 +239,7 @@ def list_memories(user_id: str | None = None, limit: int = 100, offset: int = 0)
     if mem0 is None:
         raise RuntimeError("Mem0 not initialized")
 
-    # Use Windows username if user_id not specified
-    if user_id is None:
-        user_id = os.getenv("USERNAME", "default")
+    user_id = _resolve_user_id(user_id)
 
     memories = mem0.get_all(user_id=user_id)
     # Apply pagination
@@ -295,7 +297,7 @@ def delete_memory(memory_id: str, user_id: str | None = None) -> dict:
 
     Args:
         memory_id: The ID of the memory to delete
-        user_id: User identifier (defaults to Windows username, for validation)
+        user_id: User identifier (defaults to DEFAULT_USER_ID env or USERNAME)
 
     Returns:
         Dictionary with deletion status
@@ -303,9 +305,7 @@ def delete_memory(memory_id: str, user_id: str | None = None) -> dict:
     if mem0 is None:
         raise RuntimeError("Mem0 not initialized")
 
-    # Use Windows username if user_id not specified (for logging/validation)
-    if user_id is None:
-        user_id = os.getenv("USERNAME", "default")
+    user_id = _resolve_user_id(user_id)
 
     result = mem0.delete(memory_id=memory_id)
     return {"status": "deleted", "memory_id": memory_id, "user_id": user_id, "result": json.loads(json.dumps(result, default=str))}
