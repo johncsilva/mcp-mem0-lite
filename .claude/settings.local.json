@@ -7,7 +7,12 @@
       "mcp__mem0-lite__add_memory",
       "mcp__mem0-lite__search_memory",
       "mcp__mem0-lite__list_all_user_ids",
-      "mcp__mem0-lite__delete_memory"
+      "mcp__mem0-lite__delete_memory",
+      "Bash(chmod:*)",
+      "Bash(source .venv/bin/activate)",
+      "Bash(timeout 5 python:*)",
+      "Bash(python3:*)",
+      "mcp__mem0-lite__search_rules"
     ],
     "deny": [],
     "ask": []

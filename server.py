@@ -2,10 +2,11 @@ import os
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Any
 
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 import uvicorn
@@ -32,8 +33,18 @@ EMBEDDING_DIMS = int(os.getenv("EMBEDDING_DIMS", "768"))
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 LLM_MODEL = os.getenv("LLM_MODEL", "llama3.1:8b")
 
-# Usuario padrao quando user_id nao for informado
+# Usuário padrão quando user_id não for informado (prioriza .env, depois USERNAME do SO)
 DEFAULT_USER_ID = os.getenv("DEFAULT_USER_ID") or os.getenv("USERNAME", "default")
+
+# --- Cache de consultas ------------------------------------------------------
+# Cache em memória para otimizar buscas frequentes
+search_cache = {}
+CACHE_TTL = timedelta(minutes=15)
+
+# --- Schema de Regras de Programação -----------------------------------------
+VALID_SEVERITIES = ["MUST", "SHOULD", "MAY", "DEPRECATED"]
+VALID_CATEGORIES = ["security", "performance", "style", "architecture", "testing", "documentation", "general"]
+VALID_CONTEXTS = ["dev", "production", "testing", "staging", "all"]
 
 # --- Helper Functions (precisam estar antes dos tools) -----------------------
 
@@ -70,6 +81,89 @@ def _flatten_metadata(meta: dict | None) -> dict | None:
         else:
             flat[k] = str(v)  # qualquer outro tipo -> string
     return flat
+
+
+def _expand_hierarchical_tags(tags: list[str]) -> list[str]:
+    """
+    Expande tags hierárquicas para incluir todos os níveis.
+    Exemplo: ["python.django.security"] -> ["python.django.security", "python.django", "python", "security"]
+    """
+    if not tags:
+        return []
+
+    expanded = set()
+    for tag in tags:
+        # Adiciona a tag original
+        expanded.add(tag)
+
+        # Se tem pontos, adiciona todos os níveis
+        if "." in tag:
+            parts = tag.split(".")
+            # Adiciona cada nível da hierarquia
+            for i in range(1, len(parts) + 1):
+                expanded.add(".".join(parts[:i]))
+            # Adiciona também o último elemento (categoria final)
+            expanded.add(parts[-1])
+
+    return sorted(list(expanded))
+
+
+def _validate_rule_schema(metadata: dict) -> tuple[bool, str]:
+    """
+    Valida schema de regras de programação.
+    Retorna (is_valid, error_message)
+    """
+    if not metadata:
+        return True, ""
+
+    # Valida severity se presente
+    if "severity" in metadata:
+        if metadata["severity"] not in VALID_SEVERITIES:
+            return False, f"Invalid severity '{metadata['severity']}'. Must be one of: {', '.join(VALID_SEVERITIES)}"
+
+    # Valida category se presente
+    if "category" in metadata:
+        if metadata["category"] not in VALID_CATEGORIES:
+            return False, f"Invalid category '{metadata['category']}'. Must be one of: {', '.join(VALID_CATEGORIES)}"
+
+    # Valida context se presente
+    if "context" in metadata:
+        if metadata["context"] not in VALID_CONTEXTS:
+            return False, f"Invalid context '{metadata['context']}'. Must be one of: {', '.join(VALID_CONTEXTS)}"
+
+    return True, ""
+
+
+def _get_from_cache(cache_key: str) -> dict | None:
+    """Recupera resultado do cache se ainda válido"""
+    if cache_key in search_cache:
+        entry = search_cache[cache_key]
+        if datetime.now() - entry['timestamp'] < CACHE_TTL:
+            return entry['results']
+        else:
+            # Remove entrada expirada
+            del search_cache[cache_key]
+    return None
+
+
+def _put_in_cache(cache_key: str, results: dict):
+    """Armazena resultado no cache"""
+    search_cache[cache_key] = {
+        'results': results,
+        'timestamp': datetime.now()
+    }
+
+
+def _clear_cache():
+    """Limpa todo o cache (chamar após adicionar/deletar memórias)"""
+    search_cache.clear()
+
+
+def _make_cache_key(query: str, filters: dict, limit: int) -> str:
+    """Gera chave única para cache baseado nos parâmetros de busca"""
+    filter_str = json.dumps(filters, sort_keys=True) if filters else ""
+    return f"{query}:{filter_str}:{limit}"
+
 
 # --- Mem0 Constructor --------------------------------------------------------
 
@@ -118,7 +212,7 @@ def build_mem0() -> Memory:
     }
     return Memory.from_config(config)
 
-mem0 = None
+mem0 = build_mem0()
 
 # --- MCP Server & Tools ------------------------------------------------------
 
@@ -165,6 +259,9 @@ def add_memory(
         if isinstance(nested, dict) and nested.get("id"):
             clean["id"] = nested["id"]
 
+    # Limpa cache após adicionar nova memória
+    _clear_cache()
+
     return clean
 
 
@@ -198,6 +295,16 @@ def search_memory(
 
     base_filters = filters.copy() if filters else {}
 
+    # Verifica cache (ignora offset para simplificar)
+    if offset == 0:
+        cache_filters = base_filters.copy()
+        if tags:
+            cache_filters["_tags"] = ",".join(sorted(tags))
+        cache_key = _make_cache_key(f"{query}:{user_id}", cache_filters, limit)
+        cached = _get_from_cache(cache_key)
+        if cached:
+            return cached
+
     # Single tag or no tags: direct search
     if not tags or len(tags) <= 1:
         if tags and len(tags) == 1:
@@ -206,7 +313,13 @@ def search_memory(
         # Apply offset and limit after search
         items = results.get("results", results) if isinstance(results, dict) else results
         paginated = items[offset:offset + limit] if isinstance(items, list) else items
-        return {"results": json.loads(json.dumps(paginated, default=str)), "total": len(items) if isinstance(items, list) else 0, "offset": offset, "limit": limit}
+        response = {"results": json.loads(json.dumps(paginated, default=str)), "total": len(items) if isinstance(items, list) else 0, "offset": offset, "limit": limit}
+
+        # Armazena no cache se offset == 0
+        if offset == 0:
+            _put_in_cache(cache_key, response)
+
+        return response
 
     # Multiple tags: OR logic via multiple searches
     partials = []
@@ -220,7 +333,13 @@ def search_memory(
     merged = _merge_results_or(partials, limit=limit + offset)
     # Apply offset and limit after merge
     paginated = merged[offset:offset + limit]
-    return {"results": json.loads(json.dumps(paginated, default=str)), "total": len(merged), "offset": offset, "limit": limit}
+    response = {"results": json.loads(json.dumps(paginated, default=str)), "total": len(merged), "offset": offset, "limit": limit}
+
+    # Armazena no cache se offset == 0
+    if offset == 0:
+        _put_in_cache(cache_key, response)
+
+    return response
 
 
 @mcp.tool()
@@ -308,7 +427,278 @@ def delete_memory(memory_id: str, user_id: str | None = None) -> dict:
     user_id = _resolve_user_id(user_id)
 
     result = mem0.delete(memory_id=memory_id)
+
+    # Limpa cache após deletar
+    _clear_cache()
+
     return {"status": "deleted", "memory_id": memory_id, "user_id": user_id, "result": json.loads(json.dumps(result, default=str))}
+
+
+@mcp.tool()
+def add_programming_rule(
+    rule_text: str,
+    language: str,
+    category: str,
+    severity: str = "SHOULD",
+    framework: str | None = None,
+    version: str = "1.0",
+    context: str = "all",
+    author: str | None = None,
+    examples: dict[str, str] | None = None,
+    related_rules: list[str] | None = None,
+    replaces: str | None = None,
+    user_id: str | None = None,
+    additional_metadata: dict[str, Any] | None = None,
+    check_duplicates: bool = True
+) -> dict:
+    """
+    Adds a programming rule with structured metadata optimized for code guidelines.
+
+    Args:
+        rule_text: The rule description (supports markdown format)
+        language: Programming language (e.g., 'python', 'delphi', 'go', 'javascript')
+        category: Rule category (security, performance, style, architecture, testing, documentation, general)
+        severity: Rule importance (MUST, SHOULD, MAY, DEPRECATED) - defaults to SHOULD
+        framework: Specific framework if applicable (e.g., 'django', 'react', 'fastapi')
+        version: Rule version for tracking changes (defaults to '1.0')
+        context: Where rule applies (dev, production, testing, staging, all) - defaults to all
+        author: Rule author/creator
+        examples: Dictionary with 'correct' and 'incorrect' code examples
+        related_rules: List of related rule IDs
+        replaces: ID of rule that this one replaces (for deprecation tracking)
+        user_id: User identifier (defaults to DEFAULT_USER_ID)
+        additional_metadata: Any extra metadata fields
+        check_duplicates: Check for similar rules before adding (defaults to True)
+
+    Returns:
+        Dictionary with rule details including id, or duplicate status if similar rule exists
+
+    Example:
+        add_programming_rule(
+            rule_text="Always use parameterized queries to prevent SQL injection",
+            language="python",
+            category="security",
+            severity="MUST",
+            framework="django",
+            examples={"correct": "User.objects.filter(id=user_id)", "incorrect": "cursor.execute(f'SELECT * FROM users WHERE id={user_id}')"}
+        )
+    """
+    if mem0 is None:
+        raise RuntimeError("Mem0 not initialized")
+
+    user_id = _resolve_user_id(user_id)
+
+    # Valida severity, category, context
+    if severity not in VALID_SEVERITIES:
+        return {"status": "error", "message": f"Invalid severity '{severity}'. Must be one of: {', '.join(VALID_SEVERITIES)}"}
+
+    if category not in VALID_CATEGORIES:
+        return {"status": "error", "message": f"Invalid category '{category}'. Must be one of: {', '.join(VALID_CATEGORIES)}"}
+
+    if context not in VALID_CONTEXTS:
+        return {"status": "error", "message": f"Invalid context '{context}'. Must be one of: {', '.join(VALID_CONTEXTS)}"}
+
+    # Verifica duplicatas se solicitado
+    if check_duplicates:
+        similar = mem0.search(rule_text, user_id=user_id, limit=1)
+        items = similar.get("results", similar) if isinstance(similar, dict) else similar
+        if items and len(items) > 0 and float(items[0].get("score", 0)) > 0.95:
+            return {
+                "status": "duplicate",
+                "message": "Similar rule already exists",
+                "existing_rule": json.loads(json.dumps(items[0], default=str)),
+                "similarity_score": items[0].get("score")
+            }
+
+    # Constrói metadata estruturado
+    metadata = {
+        "language": language.lower(),
+        "category": category,
+        "severity": severity,
+        "version": version,
+        "context": context,
+        "rule_type": "programming_rule",
+        "created_at": datetime.now().isoformat()
+    }
+
+    if framework:
+        metadata["framework"] = framework.lower()
+    if author:
+        metadata["author"] = author
+    if examples:
+        metadata["has_examples"] = True
+        if "correct" in examples:
+            metadata["example_correct"] = examples["correct"]
+        if "incorrect" in examples:
+            metadata["example_incorrect"] = examples["incorrect"]
+    if related_rules:
+        metadata["related_rules"] = ",".join(related_rules)
+    if replaces:
+        metadata["replaces"] = replaces
+
+    # Adiciona metadata adicional se fornecido
+    if additional_metadata:
+        metadata.update(_flatten_metadata(additional_metadata) or {})
+
+    # Cria tags hierárquicas automáticas
+    tags = [language.lower(), category]
+    if framework:
+        tags.append(f"{language.lower()}.{framework.lower()}")
+        tags.append(f"{language.lower()}.{framework.lower()}.{category}")
+    else:
+        tags.append(f"{language.lower()}.{category}")
+
+    # Expande tags hierárquicas
+    expanded_tags = _expand_hierarchical_tags(tags)
+    metadata["tags"] = ",".join(expanded_tags)
+
+    # Adiciona a regra
+    result = mem0.add(rule_text, user_id=user_id, metadata=metadata)
+    clean = json.loads(json.dumps(result, default=str))
+
+    # Normaliza id
+    if isinstance(clean, dict) and "id" not in clean:
+        nested = None
+        if isinstance(clean.get("results"), list) and clean["results"]:
+            nested = clean["results"][0]
+        elif isinstance(clean.get("data"), list) and clean["data"]:
+            nested = clean["data"][0]
+        if isinstance(nested, dict) and nested.get("id"):
+            clean["id"] = nested["id"]
+
+    # Limpa cache após adicionar
+    _clear_cache()
+
+    return {
+        "status": "added",
+        "rule": clean,
+        "metadata": metadata,
+        "tags": expanded_tags
+    }
+
+
+@mcp.tool()
+def search_rules(
+    query: str | None = None,
+    language: str | None = None,
+    category: str | None = None,
+    severity: list[str] | None = None,
+    framework: str | None = None,
+    context: str | None = None,
+    user_id: str | None = None,
+    min_score: float = 0.6,
+    limit: int = 10
+) -> dict:
+    """
+    Searches programming rules with hybrid filtering (exact filters + semantic search).
+    Optimized for code guidelines with caching support.
+
+    Args:
+        query: Semantic search query (optional - if None, returns all matching filters)
+        language: Filter by programming language (exact match)
+        category: Filter by category (exact match)
+        severity: Filter by severity levels (list for OR logic, e.g., ["MUST", "SHOULD"])
+        framework: Filter by framework (exact match)
+        context: Filter by context where rule applies (exact match)
+        user_id: User identifier (defaults to DEFAULT_USER_ID)
+        min_score: Minimum similarity score (0.0-1.0) - defaults to 0.6
+        limit: Maximum number of results to return
+
+    Returns:
+        Dictionary with filtered and scored results
+
+    Examples:
+        # Search for Python security rules
+        search_rules(query="SQL injection", language="python", category="security")
+
+        # Get all MUST rules for Django
+        search_rules(language="python", framework="django", severity=["MUST"])
+
+        # Semantic search across all Delphi rules
+        search_rules(query="memory management", language="delphi", min_score=0.7)
+    """
+    if mem0 is None:
+        raise RuntimeError("Mem0 not initialized")
+
+    user_id = _resolve_user_id(user_id)
+
+    # Constrói filtros exatos
+    filters = {"rule_type": "programming_rule"}
+
+    if language:
+        filters["language"] = language.lower()
+    if category:
+        filters["category"] = category
+    if framework:
+        filters["framework"] = framework.lower()
+    if context:
+        filters["context"] = context
+
+    # Verifica cache (apenas para queries com texto)
+    if query:
+        cache_key = _make_cache_key(f"{query}:{user_id}", filters, limit)
+        cached = _get_from_cache(cache_key)
+        if cached:
+            return cached
+
+    # Se tem múltiplos severities, faz OR logic
+    if severity and len(severity) > 1:
+        partials = []
+        for sev in severity:
+            filt = filters.copy()
+            filt["severity"] = sev
+
+            if query:
+                res = mem0.search(query, user_id=user_id, filters=filt, limit=limit * 2)
+            else:
+                # Sem query, pega todas as memórias e filtra
+                all_memories = mem0.get_all(user_id=user_id)
+                # Trata caso get_all retorne dict ou list
+                memories_list = all_memories.get("results", all_memories) if isinstance(all_memories, dict) else all_memories
+                res = [m for m in memories_list if all(m.get("metadata", {}).get(k) == v for k, v in filt.items())]
+
+            items = res.get("results", res) if isinstance(res, dict) else res
+            partials.append(items)
+
+        merged = _merge_results_or(partials, limit=limit * 2)
+        results = merged
+    else:
+        # Severity único ou nenhum
+        if severity and len(severity) == 1:
+            filters["severity"] = severity[0]
+
+        if query:
+            res = mem0.search(query, user_id=user_id, filters=filters, limit=limit * 2)
+            results = res.get("results", res) if isinstance(res, dict) else res
+        else:
+            # Sem query, pega todas as memórias e filtra
+            all_memories = mem0.get_all(user_id=user_id)
+            # Trata caso get_all retorne dict ou list
+            memories_list = all_memories.get("results", all_memories) if isinstance(all_memories, dict) else all_memories
+            results = [m for m in memories_list if all(m.get("metadata", {}).get(k) == v for k, v in filters.items())]
+
+    # Filtra por min_score
+    if query and results:
+        filtered = [r for r in results if float(r.get("score", 0)) >= min_score]
+    else:
+        filtered = results
+
+    # Limita resultados
+    final_results = filtered[:limit] if filtered else []
+
+    response = {
+        "results": json.loads(json.dumps(final_results, default=str)),
+        "total": len(final_results),
+        "filters_applied": filters,
+        "min_score": min_score,
+        "query": query
+    }
+
+    # Armazena no cache se tinha query
+    if query:
+        _put_in_cache(cache_key, response)
+
+    return response
 
 
 @mcp.tool()
@@ -425,8 +815,6 @@ def change_llm_config(provider: str, model: str) -> dict:
 
 @asynccontextmanager
 async def lifespan(_):
-    global mem0
-    mem0 = build_mem0()
     yield
 
 # --- app principal ------------------------------------------------------------
@@ -437,9 +825,11 @@ main_app.router.lifespan_context = lifespan
 # endpoints temporários de teste ----------------------------------------------
 
 @main_app.get("/_test/add")
-async def test_add(text: str, user_id: str = "default", tags: str | None = None):
+async def test_add(text: str, user_id: str = DEFAULT_USER_ID, tags: str | None = None):
     if mem0 is None:
         raise RuntimeError("Mem0 não foi inicializado")
+
+    resolved_user_id = _resolve_user_id(user_id)
 
     meta = None
     if tags and tags.strip():
@@ -447,7 +837,7 @@ async def test_add(text: str, user_id: str = "default", tags: str | None = None)
 
     item = mem0.add(
         text,
-        user_id=user_id,
+        user_id=resolved_user_id,
         metadata=meta
     )
     return json.loads(json.dumps(item, default=str))
@@ -456,7 +846,7 @@ async def test_add(text: str, user_id: str = "default", tags: str | None = None)
 @main_app.get("/_test/search")
 async def test_search(
     query: str,
-    user_id: str = "default",
+    user_id: str = DEFAULT_USER_ID,
     tags: str | None = None,      # pode ser "uma" ou "a,b,c"
     priority: str | None = None,
     owner: str | None = None,
@@ -470,6 +860,8 @@ async def test_search(
     """
     if mem0 is None:
         raise RuntimeError("Mem0 não foi inicializado")
+
+    resolved_user_id = _resolve_user_id(user_id)
     # filtros escalares (sempre igualdade)
     base_filters = {}
     if priority:
@@ -486,7 +878,7 @@ async def test_search(
         filt = base_filters.copy()
         if tags:
             filt["tags"] = tags  # uma única tag (str)
-        results = mem0.search(query, user_id=user_id, filters=(filt or None), limit=limit)
+        results = mem0.search(query, user_id=resolved_user_id, filters=(filt or None), limit=limit)
         return {"results": json.loads(json.dumps(results, default=str))}
 
     # caso 2: várias tags -> faz N buscas (OR lógico) e une do lado do servidor
@@ -495,7 +887,7 @@ async def test_search(
     for t in tag_list:
         filt = base_filters.copy()
         filt["tags"] = t  # UMA tag por busca
-        res = mem0.search(query, user_id=user_id, filters=filt, limit=limit)
+        res = mem0.search(query, user_id=resolved_user_id, filters=filt, limit=limit)
         # 'res' costuma ser um dict com 'results' ou lista direta (dependendo da versão do mem0ai)
         items = res.get("results", res) if isinstance(res, dict) else res
         partials.append(items)
@@ -506,7 +898,7 @@ async def test_search(
 
 class AddPayload(BaseModel):
     text: str
-    user_id: str = "default"
+    user_id: str = DEFAULT_USER_ID
     tags: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
 
@@ -515,6 +907,7 @@ async def test_add_json(payload: AddPayload):
     if mem0 is None:
         raise RuntimeError("Mem0 não foi inicializado")
 
+    resolved_user_id = _resolve_user_id(payload.user_id)
     # Mescla tags no metadata
     meta = _flatten_metadata(payload.metadata) or {}
     if payload.tags:
@@ -522,7 +915,7 @@ async def test_add_json(payload: AddPayload):
 
     item = mem0.add(
         payload.text,
-        user_id=payload.user_id,
+        user_id=resolved_user_id,
         metadata=meta if meta else None
     )
     return json.loads(json.dumps(item, default=str))
@@ -559,6 +952,8 @@ async def help_endpoint():
             "list_memories": "List all memories for a user (paginated)",
             "list_all_user_ids": "Get all user_ids in the system",
             "delete_memory": "Delete a specific memory by ID",
+            "add_programming_rule": "Add programming rule with structured metadata and validation",
+            "search_rules": "Search rules with hybrid filtering (exact + semantic) and caching",
             "list_llm_options": "Show available LLM configurations",
             "change_llm_config": "Switch LLM provider/model dynamically"
         },
@@ -600,6 +995,14 @@ async def help_endpoint():
             },
             "list_memories": {
                 "example": "list_memories(user_id='johnc', limit=50, offset=0)"
+            },
+            "add_programming_rule": {
+                "example": "add_programming_rule(rule_text='Use parameterized queries', language='python', category='security', severity='MUST', framework='django')",
+                "notes": "Automatically creates hierarchical tags and validates schema. Checks for duplicates by default."
+            },
+            "search_rules": {
+                "example": "search_rules(query='SQL injection', language='python', category='security', min_score=0.7)",
+                "notes": "Combines exact filters with semantic search. Results are cached for 15 minutes."
             }
         },
         "features": {
@@ -608,7 +1011,12 @@ async def help_endpoint():
             "tag_filtering": "OR logic across multiple tags",
             "metadata_filters": "Filter by custom fields (priority, owner, etc.)",
             "pagination": "Offset/limit support for large result sets",
-            "dynamic_llm": "Switch LLM models without restarting"
+            "dynamic_llm": "Switch LLM models without restarting",
+            "hierarchical_tags": "Automatic tag expansion (python.django.security -> python, django, security)",
+            "schema_validation": "Validates rule metadata (severity, category, context)",
+            "deduplication": "Automatic detection of duplicate rules (configurable)",
+            "query_caching": "15-minute cache for frequent searches (cleared on add/delete)",
+            "hybrid_search": "Combines exact filtering with semantic similarity"
         },
         "links": {
             "github": "https://github.com/yourusername/mcp-mem0-lite",
