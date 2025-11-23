@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mem0-lite": {
+      "type": "sse",
+      "url": "http://127.0.0.1:8050/mcp/sse"
+    }
+  }
+}

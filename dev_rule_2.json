@@ -1,0 +1,27 @@
+{
+  "text": "[DEV_RULE] DR-DEL-002 — Padrões FMX para componentes visuais. Applies: delphi/fmx. Priority: should. Resumo: prefira estilos e bindings; evite lógica pesada em eventos de UI.",
+  "user_id": "john",
+  "tags": [
+    "DEV_RULE",
+    "delphi","fmx",
+    "should",
+    "owner:john",
+    "version:2025-11-12",
+    "id:DR-DEL-002",
+    "topic:ui-patterns"
+  ],
+  "metadata": {
+    "id": "DR-DEL-002",
+    "type": "DEV_RULE",
+    "title": "Padrões FMX para componentes visuais",
+    "applies_to": ["delphi", "fmx"],
+    "priority": "should",
+    "version": "2025-11-12",
+    "owner": "john",
+    "examples": [
+      "Preferir estilos (TStyleBook) e LiveBindings para separar UI de lógica.",
+      "Evitar lógica de negócio em eventos OnClick/OnChange — delegar para serviços.",
+      "Para listas grandes, usar virtualização ou dados paginados."
+    ]
+  }
+}

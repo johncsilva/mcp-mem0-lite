@@ -1,0 +1,10 @@
+model = "gpt-5-codex"
+model_reasoning_effort = "high"
+windows_wsl_setup_acknowledged = true
+
+[features]
+rmcp_client = true
+
+[mcp_servers.mem0-lite]
+command = "npx"
+args = ["-y", "mcp-remote@latest", "http://127.0.0.1:8050/mcp/sse"]
