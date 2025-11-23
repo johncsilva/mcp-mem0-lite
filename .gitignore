@@ -6,3 +6,10 @@
 __pycache__/
 mem0.db
 chroma_db/
+__pycache__/server.cpython-312.pyc
+__pycache__/server.cpython-312.pyc
+chroma_db/chroma.sqlite3
+chroma_db/49aebc4a-b730-4bb0-a38a-26584fda56ed/data_level0.bin
+chroma_db/49aebc4a-b730-4bb0-a38a-26584fda56ed/length.bin
+chroma_db/cfbe2bb7-1847-43d3-b5a5-3c7dcc13ee46/data_level0.bin
+chroma_db/cfbe2bb7-1847-43d3-b5a5-3c7dcc13ee46/length.bin

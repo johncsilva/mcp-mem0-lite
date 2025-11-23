@@ -1,10 +1,15 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+import os
+from pathlib import Path
 import chromadb
 import sys
 
-# Connect to ChromaDB
-client = chromadb.PersistentClient(path="C:/Dev/mcp-mem0-lite/chroma_db")
+BASE_DIR = Path(__file__).resolve().parent
+CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", str(BASE_DIR / "chroma_db"))
+
+# Connect to ChromaDB (respects CHROMA_PERSIST_DIR or defaults to local folder)
+client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
 
 # Get collection
 try:

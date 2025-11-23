@@ -1,6 +1,7 @@
 import os
 import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -14,13 +15,15 @@ from mem0.memory.main import Memory
 
 load_dotenv()
 
+BASE_DIR = Path(__file__).resolve().parent
+
 HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "8050"))
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///C:/Dev/mcp-mem0-lite/mem0.db")
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{(BASE_DIR / 'mem0.db')}")
 
 VECTOR_STORE_PROVIDER = os.getenv("VECTOR_STORE_PROVIDER", "chroma").lower()
-CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "C:/Dev/mcp-mem0-lite/chroma_db")
+CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", str(BASE_DIR / "chroma_db"))
 
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "ollama")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
@@ -144,7 +147,19 @@ def add_memory(
         meta["tags"] = ",".join(tags)
 
     result = mem0.add(text, user_id=user_id, metadata=meta if meta else None)
-    return json.loads(json.dumps(result, default=str))
+    clean = json.loads(json.dumps(result, default=str))
+
+    # Normalize id for clients that expect a flat payload
+    if isinstance(clean, dict) and "id" not in clean:
+        nested = None
+        if isinstance(clean.get("results"), list) and clean["results"]:
+            nested = clean["results"][0]
+        elif isinstance(clean.get("data"), list) and clean["data"]:
+            nested = clean["data"][0]
+        if isinstance(nested, dict) and nested.get("id"):
+            clean["id"] = nested["id"]
+
+    return clean
 
 
 @mcp.tool()
@@ -563,12 +578,12 @@ async def help_endpoint():
         },
         "integration": {
             "claude_desktop": {
-                "config_file": "~/AppData/Roaming/Claude/claude_desktop_config.json (Windows)",
+                "config_file": "~/.config/Claude/claude_desktop_config.json (Linux/WSL)",
                 "example": {
                     "mcpServers": {
                         "mem0-lite": {
                             "command": "python",
-                            "args": ["C:/Dev/mcp-mem0-lite/server.py"],
+                            "args": [str(Path(__file__).resolve())],
                             "env": {}
                         }
                     }

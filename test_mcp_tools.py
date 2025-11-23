@@ -6,6 +6,8 @@ Execute com o servidor rodando em background.
 import json
 import sys
 import io
+import time
+from pathlib import Path
 
 # Fix encoding para Windows
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -16,8 +18,9 @@ def test_mcp_tools():
     print("TESTE DE VALIDAÇÃO MCP TOOLS - MEM0-LITE")
     print("=" * 60)
 
-    # Import do servidor
-    sys.path.insert(0, "C:\\Dev\\mcp-mem0-lite")
+    # Import do servidor (usa caminho relativo ao arquivo)
+    BASE_DIR = Path(__file__).resolve().parent
+    sys.path.insert(0, str(BASE_DIR))
     from server import add_memory, search_memory, list_memories, delete_memory, mem0, build_mem0
 
     # Inicializa mem0 se necessário
@@ -32,14 +35,21 @@ def test_mcp_tools():
     print("-" * 60)
 
     result = add_memory(
-        text="[TEST] MCP tool validation - async patterns in Python",
+        text=f"[TEST] MCP tool validation - async patterns in Python ({time.time():.0f})",
         user_id="test_user",
         tags=["TEST", "python", "async"],
         metadata={"priority": "high", "category": "validation"}
     )
 
-    print(f"✓ Memória adicionada: {result.get('id', 'N/A')}")
-    memory_id = result.get("id")
+    memory_id = (
+        (result.get("id") if isinstance(result, dict) else None)
+        or (result.get("results")[0].get("id") if isinstance(result, dict) and result.get("results") else None)
+        or (result.get("data")[0].get("id") if isinstance(result, dict) and result.get("data") else None)
+    )
+
+    print(f"✓ Memória adicionada: {memory_id or 'N/A'}")
+    if not memory_id:
+        print(f"  Raw retorno add_memory: {result}")
 
     print("\n" + "-" * 60)
     print("TESTE 2: search_memory")
@@ -66,10 +76,18 @@ def test_mcp_tools():
 
     list_result = list_memories(user_id="test_user", limit=5)
     memories = list_result.get("memories", [])
+    if isinstance(memories, dict):
+        # Compat: mem0 may return nested dicts; flatten the common shapes
+        memories = memories.get("memories") or memories.get("results") or list(memories.values())
+    if memories is None:
+        memories = []
+    if not isinstance(memories, list):
+        memories = [memories]
 
     print(f"✓ Total de memórias: {len(memories)}")
     for i, mem in enumerate(memories[:3], 1):
-        print(f"  {i}. {mem.get('memory', 'N/A')[:50]}...")
+        text = mem.get("memory") or mem.get("text") or str(mem)
+        print(f"  {i}. {text[:50]}...")
 
     print("\n" + "-" * 60)
     print("TESTE 4: delete_memory")

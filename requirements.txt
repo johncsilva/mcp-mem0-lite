@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+python-dotenv
+pydantic
+mem0ai
+mcp
+chromadb
+ollama
