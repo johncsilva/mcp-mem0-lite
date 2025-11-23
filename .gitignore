@@ -1,2 +1,8 @@
 *.rar
-
+.env
+.env.local
+.env.local.backup
+.venv
+__pycache__/
+mem0.db
+chroma_db/
