@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
+from uuid import uuid4
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -45,6 +46,8 @@ CACHE_TTL = timedelta(minutes=15)
 VALID_SEVERITIES = ["MUST", "SHOULD", "MAY", "DEPRECATED"]
 VALID_CATEGORIES = ["security", "performance", "style", "architecture", "testing", "documentation", "general"]
 VALID_CONTEXTS = ["dev", "production", "testing", "staging", "all"]
+PLAN_STATUSES = {"active", "paused", "done"}
+ITEM_STATUSES = {"todo", "doing", "done"}
 
 # --- Helper Functions (precisam estar antes dos tools) -----------------------
 
@@ -163,6 +166,105 @@ def _make_cache_key(query: str, filters: dict, limit: int) -> str:
     """Gera chave única para cache baseado nos parâmetros de busca"""
     filter_str = json.dumps(filters, sort_keys=True) if filters else ""
     return f"{query}:{filter_str}:{limit}"
+
+
+def _extract_id_from_mem0(clean: dict) -> str | None:
+    """Extrai ID de resultados do mem0 (padrão add/search)."""
+    if not isinstance(clean, dict):
+        return None
+    if clean.get("id"):
+        return clean.get("id")
+    nested = None
+    if isinstance(clean.get("results"), list) and clean["results"]:
+        nested = clean["results"][0]
+    elif isinstance(clean.get("data"), list) and clean["data"]:
+        nested = clean["data"][0]
+    if isinstance(nested, dict):
+        return nested.get("id")
+    return None
+
+
+def _parse_checklist(raw: Any) -> list[dict]:
+    """Converte metadata.checklist (string JSON ou lista) em lista de itens."""
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+    return []
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _plan_memories_for_user(user_id: str) -> list[dict]:
+    """Retorna apenas memórias do tipo plano para o user_id informado."""
+    all_memories = mem0.get_all(user_id=user_id)
+    memories_list = all_memories.get("results", all_memories) if isinstance(all_memories, dict) else all_memories
+    return [m for m in (memories_list or []) if (m.get("metadata") or {}).get("rule_type") == "plan"]
+
+
+def _find_plan_by_id(plan_id: str, user_id: str) -> dict | None:
+    """Localiza o plano pelo plan_id no conjunto do usuário."""
+    for plan in _plan_memories_for_user(user_id):
+        meta = plan.get("metadata") or {}
+        if meta.get("plan_id") == plan_id:
+            return plan
+    return None
+
+
+def _normalize_plan_memory(memory_item: dict) -> dict:
+    """Normaliza estrutura de plano para retorno dos tools."""
+    metadata = (memory_item or {}).get("metadata") or {}
+    checklist = _parse_checklist(metadata.get("checklist"))
+    open_items = metadata.get("open_items")
+    open_items = _coerce_int(open_items, sum(1 for item in checklist if item.get("status") != "done"))
+    total_items = metadata.get("total_items")
+    total_items = _coerce_int(total_items, len(checklist))
+
+    return {
+        "id": memory_item.get("id"),
+        "plan_id": metadata.get("plan_id"),
+        "title": memory_item.get("memory") or metadata.get("title"),
+        "status": metadata.get("status", "active"),
+        "priority": metadata.get("priority", "normal"),
+        "due_date": metadata.get("due_date"),
+        "open_items": open_items,
+        "total_items": total_items,
+        "checklist": checklist,
+        "tags": metadata.get("tags"),
+        "metadata": metadata,
+    }
+
+
+def _save_plan_memory(plan_memory: dict, metadata: dict, user_id: str) -> tuple[dict, str | None]:
+    """Persiste mudanças de plano recriando a memória (mem0 não expõe update)."""
+    title = plan_memory.get("memory") or metadata.get("title") or metadata.get("plan_id") or "Plano"
+    add_result = mem0.add(title, user_id=user_id, metadata=metadata)
+    clean = json.loads(json.dumps(add_result, default=str))
+    new_id = _extract_id_from_mem0(clean)
+    warning = None
+
+    # Remove a memória antiga para evitar duplicação do plan_id
+    if plan_memory.get("id"):
+        try:
+            mem0.delete(memory_id=plan_memory["id"])
+        except Exception as e:
+            warning = f"Plano atualizado, mas falhou ao remover versão anterior: {e}"
+
+    _clear_cache()
+
+    normalized = _normalize_plan_memory({"id": new_id, "memory": title, "metadata": metadata})
+    return normalized, warning
 
 
 # --- Mem0 Constructor --------------------------------------------------------
@@ -432,6 +534,256 @@ def delete_memory(memory_id: str, user_id: str | None = None) -> dict:
     _clear_cache()
 
     return {"status": "deleted", "memory_id": memory_id, "user_id": user_id, "result": json.loads(json.dumps(result, default=str))}
+
+
+@mcp.tool()
+def add_plan(
+    title: str,
+    items: list[str] | None = None,
+    tags: list[str] | None = None,
+    priority: str = "normal",
+    due_date: str | None = None,
+    status: str = "active",
+    user_id: str | None = None
+) -> dict:
+    """
+    Cria um novo plano com checklist.
+    """
+    if mem0 is None:
+        raise RuntimeError("Mem0 not initialized")
+
+    user_id = _resolve_user_id(user_id)
+
+    if status not in PLAN_STATUSES:
+        return {"status": "error", "message": f"Invalid status '{status}'. Must be one of: {', '.join(sorted(PLAN_STATUSES))}"}
+
+    plan_id = str(uuid4())
+    now = datetime.now().isoformat()
+    checklist = []
+    for item_title in (items or []):
+        checklist.append({
+            "id": str(uuid4()),
+            "title": item_title,
+            "status": "todo",
+            "note": None,
+            "created_at": now,
+            "updated_at": now
+        })
+
+    base_tags = list(tags) if tags else []
+    if "planning" not in base_tags:
+        base_tags.append("planning")
+    expanded_tags = _expand_hierarchical_tags(base_tags)
+    open_items = sum(1 for item in checklist if item.get("status") != "done")
+
+    metadata = {
+        "rule_type": "plan",
+        "plan_id": plan_id,
+        "title": title,
+        "status": status,
+        "priority": priority,
+        "due_date": due_date,
+        "open_items": open_items,
+        "total_items": len(checklist),
+        "checklist": json.dumps(checklist),
+        "created_at": now,
+        "updated_at": now,
+    }
+    if expanded_tags:
+        metadata["tags"] = ",".join(expanded_tags)
+
+    result = mem0.add(title, user_id=user_id, metadata=metadata)
+    clean = json.loads(json.dumps(result, default=str))
+    new_id = _extract_id_from_mem0(clean)
+    normalized = _normalize_plan_memory({"id": new_id, "memory": title, "metadata": metadata})
+
+    _clear_cache()
+
+    response = {"status": "added", "plan_id": plan_id, "plan": normalized}
+    if expanded_tags:
+        response["tags"] = expanded_tags
+    return response
+
+
+@mcp.tool()
+def list_plans(
+    user_id: str | None = None,
+    status: str | None = None,
+    tag: str | None = None,
+    only_open: bool = False,
+    limit: int = 20,
+    offset: int = 0
+) -> dict:
+    """
+    Lista planos do usuário com filtros opcionais.
+    """
+    if mem0 is None:
+        raise RuntimeError("Mem0 not initialized")
+
+    user_id = _resolve_user_id(user_id)
+    plans = _plan_memories_for_user(user_id)
+
+    filtered = []
+    for plan in plans:
+        meta = plan.get("metadata") or {}
+        if status and meta.get("status") != status:
+            continue
+        if only_open:
+            open_items = _coerce_int(meta.get("open_items"), None)
+            if open_items is None:
+                checklist = _parse_checklist(meta.get("checklist"))
+                open_items = sum(1 for item in checklist if item.get("status") != "done")
+            if open_items <= 0:
+                continue
+        if tag:
+            tag_list = [t.strip() for t in (meta.get("tags") or "").split(",") if t.strip()]
+            if tag not in tag_list:
+                continue
+        filtered.append(_normalize_plan_memory(plan))
+
+    total = len(filtered)
+    paginated = filtered[offset:offset + limit]
+
+    return {
+        "plans": json.loads(json.dumps(paginated, default=str)),
+        "total": total,
+        "offset": offset,
+        "limit": limit
+    }
+
+
+@mcp.tool()
+def get_plan(plan_id: str, user_id: str | None = None) -> dict:
+    """
+    Recupera um plano específico pelo plan_id.
+    """
+    if mem0 is None:
+        raise RuntimeError("Mem0 not initialized")
+
+    user_id = _resolve_user_id(user_id)
+    plan = _find_plan_by_id(plan_id, user_id)
+    if not plan:
+        return {"status": "not_found", "plan_id": plan_id}
+
+    return {"status": "ok", "plan": json.loads(json.dumps(_normalize_plan_memory(plan), default=str))}
+
+
+@mcp.tool()
+def update_plan_item(
+    plan_id: str,
+    item_id: str,
+    status: str,
+    note: str | None = None,
+    user_id: str | None = None
+) -> dict:
+    """
+    Atualiza status/nota de um item do plano.
+    """
+    if mem0 is None:
+        raise RuntimeError("Mem0 not initialized")
+
+    user_id = _resolve_user_id(user_id)
+    if status not in ITEM_STATUSES:
+        return {"status": "error", "message": f"Invalid item status '{status}'. Must be one of: {', '.join(sorted(ITEM_STATUSES))}"}
+
+    plan = _find_plan_by_id(plan_id, user_id)
+    if not plan:
+        return {"status": "not_found", "plan_id": plan_id}
+
+    metadata = (plan.get("metadata") or {}).copy()
+    checklist = _parse_checklist(metadata.get("checklist"))
+    found = False
+    now = datetime.now().isoformat()
+    for item in checklist:
+        if item.get("id") == item_id:
+            item["status"] = status
+            if note is not None:
+                item["note"] = note
+            item["updated_at"] = now
+            found = True
+            break
+
+    if not found:
+        return {"status": "not_found", "plan_id": plan_id, "item_id": item_id}
+
+    metadata["checklist"] = json.dumps(checklist)
+    metadata["open_items"] = sum(1 for i in checklist if i.get("status") != "done")
+    metadata["total_items"] = len(checklist)
+    metadata["updated_at"] = now
+    # Preserva campos chave
+    metadata["rule_type"] = "plan"
+    metadata["plan_id"] = plan_id
+    if "title" not in metadata:
+        metadata["title"] = plan.get("memory")
+
+    normalized, warning = _save_plan_memory(plan, metadata, user_id)
+    response = {"status": "updated", "plan": json.loads(json.dumps(normalized, default=str))}
+    if warning:
+        response["warning"] = warning
+    return response
+
+
+@mcp.tool()
+def add_plan_item(
+    plan_id: str,
+    title: str,
+    user_id: str | None = None
+) -> dict:
+    """
+    Adiciona um item ao checklist do plano.
+    """
+    if mem0 is None:
+        raise RuntimeError("Mem0 not initialized")
+
+    user_id = _resolve_user_id(user_id)
+    plan = _find_plan_by_id(plan_id, user_id)
+    if not plan:
+        return {"status": "not_found", "plan_id": plan_id}
+
+    metadata = (plan.get("metadata") or {}).copy()
+    checklist = _parse_checklist(metadata.get("checklist"))
+    now = datetime.now().isoformat()
+    checklist.append({
+        "id": str(uuid4()),
+        "title": title,
+        "status": "todo",
+        "note": None,
+        "created_at": now,
+        "updated_at": now
+    })
+
+    metadata["checklist"] = json.dumps(checklist)
+    metadata["open_items"] = sum(1 for i in checklist if i.get("status") != "done")
+    metadata["total_items"] = len(checklist)
+    metadata["updated_at"] = now
+    metadata["rule_type"] = "plan"
+    metadata["plan_id"] = plan_id
+    if "title" not in metadata:
+        metadata["title"] = plan.get("memory")
+
+    normalized, warning = _save_plan_memory(plan, metadata, user_id)
+    response = {"status": "updated", "plan": json.loads(json.dumps(normalized, default=str))}
+    if warning:
+        response["warning"] = warning
+    return response
+
+
+@mcp.tool()
+def delete_plan(plan_id: str, user_id: str | None = None) -> dict:
+    """
+    Remove um plano (toda a memória associada).
+    """
+    if mem0 is None:
+        raise RuntimeError("Mem0 not initialized")
+
+    user_id = _resolve_user_id(user_id)
+    plan = _find_plan_by_id(plan_id, user_id)
+    if not plan:
+        return {"status": "not_found", "plan_id": plan_id}
+
+    mem0.delete(memory_id=plan.get("id"))
+    _clear_cache()
+    return {"status": "deleted", "plan_id": plan_id, "memory_id": plan.get("id")}
 
 
 @mcp.tool()
@@ -952,6 +1304,12 @@ async def help_endpoint():
             "list_memories": "List all memories for a user (paginated)",
             "list_all_user_ids": "Get all user_ids in the system",
             "delete_memory": "Delete a specific memory by ID",
+            "add_plan": "Create a plan with checklist items",
+            "list_plans": "List plans with optional filters (status, tag, only_open)",
+            "get_plan": "Fetch a single plan by plan_id",
+            "update_plan_item": "Mark/update a checklist item in a plan",
+            "add_plan_item": "Append a new item to a plan",
+            "delete_plan": "Remove a plan and its checklist",
             "add_programming_rule": "Add programming rule with structured metadata and validation",
             "search_rules": "Search rules with hybrid filtering (exact + semantic) and caching",
             "list_llm_options": "Show available LLM configurations",
@@ -995,6 +1353,15 @@ async def help_endpoint():
             },
             "list_memories": {
                 "example": "list_memories(user_id='johnc', limit=50, offset=0)"
+            },
+            "add_plan": {
+                "example": "add_plan(title='Entrega sprint', items=['Planejar tarefas', 'Implementar feature A'])"
+            },
+            "list_plans": {
+                "example": "list_plans(status='active', only_open=True, limit=10)"
+            },
+            "update_plan_item": {
+                "example": "update_plan_item(plan_id='abc', item_id='123', status='done')"
             },
             "add_programming_rule": {
                 "example": "add_programming_rule(rule_text='Use parameterized queries', language='python', category='security', severity='MUST', framework='django')",
