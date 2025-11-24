@@ -1,5 +1,6 @@
 import os
 import json
+import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -23,16 +24,59 @@ HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "8050"))
 
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{(BASE_DIR / 'mem0.db')}")
+# Mem0 usa history_db_path internamente; padronizamos para o arquivo local do projeto.
+HISTORY_DB_PATH = os.getenv("HISTORY_DB_PATH", str(BASE_DIR / "mem0.db"))
 
 VECTOR_STORE_PROVIDER = os.getenv("VECTOR_STORE_PROVIDER", "chroma").lower()
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", str(BASE_DIR / "chroma_db"))
+
+
+def _get_chroma_collection_dimension(collection_name: str) -> int | None:
+    """Reads collection dimension directly from Chroma's sqlite store (if present)."""
+    db_path = Path(CHROMA_PERSIST_DIR) / "chroma.sqlite3"
+    if not db_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.execute("select dimension from collections where name=?", (collection_name,))
+        row = cur.fetchone()
+        return int(row[0]) if row else None
+    except Exception:
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _resolve_chroma_collection_name() -> str:
+    """
+    Picks a collection name that matches the configured embedding dimensions.
+    If the existing collection has a different dimension, suffix the name to avoid clashes.
+    """
+    base_name = os.getenv("CHROMA_COLLECTION_NAME", "mem0_local")
+    existing_dim = _get_chroma_collection_dimension(base_name)
+    if existing_dim is not None and existing_dim != EMBEDDING_DIMS:
+        # Avoid reusing an incompatible collection; keep the old data under the old name.
+        fallback = f"{base_name}_{EMBEDDING_DIMS}"
+        print(
+            f"[INFO] Collection '{base_name}' has dim {existing_dim}, expected {EMBEDDING_DIMS}; using '{fallback}'."
+        )
+        return f"{base_name}_{EMBEDDING_DIMS}"
+    return base_name
+
 
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "ollama")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
 EMBEDDING_DIMS = int(os.getenv("EMBEDDING_DIMS", "768"))
 
+CHROMA_COLLECTION_NAME = _resolve_chroma_collection_name()
+
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 LLM_MODEL = os.getenv("LLM_MODEL", "llama3.1:8b")
+# Controla se o mem0.add usa inferência de LLM (padrão: True)
+MEM0_INFER = os.getenv("MEM0_INFER", "true").strip().lower() not in {"0", "false", "no"}
 
 # Usuário padrão quando user_id não for informado (prioriza .env, depois USERNAME do SO)
 DEFAULT_USER_ID = os.getenv("DEFAULT_USER_ID") or os.getenv("USERNAME", "default")
@@ -249,8 +293,14 @@ def _normalize_plan_memory(memory_item: dict) -> dict:
 def _save_plan_memory(plan_memory: dict, metadata: dict, user_id: str) -> tuple[dict, str | None]:
     """Persiste mudanças de plano recriando a memória (mem0 não expõe update)."""
     title = plan_memory.get("memory") or metadata.get("title") or metadata.get("plan_id") or "Plano"
-    add_result = mem0.add(title, user_id=user_id, metadata=metadata)
+    add_result = mem0.add(title, user_id=user_id, metadata=metadata, infer=MEM0_INFER)
     clean = json.loads(json.dumps(add_result, default=str))
+
+    # Se infer=True retornou results vazio, tenta novamente com infer=False
+    if MEM0_INFER and isinstance(clean.get("results"), list) and not clean["results"]:
+        add_result = mem0.add(title, user_id=user_id, metadata=metadata, infer=False)
+        clean = json.loads(json.dumps(add_result, default=str))
+
     new_id = _extract_id_from_mem0(clean)
     warning = None
 
@@ -292,6 +342,7 @@ def build_mem0() -> Memory:
         llm_config["ollama_base_url"] = "http://127.0.0.1:11434"
 
     config = {
+        "history_db_path": HISTORY_DB_PATH,
         "database": {
             "type": "sqlite",
             "connection_string": DATABASE_URL,
@@ -300,7 +351,7 @@ def build_mem0() -> Memory:
             "provider": "chroma",
             "config": {
                 "path": CHROMA_PERSIST_DIR,
-                "collection_name": "mem0_local"
+                "collection_name": CHROMA_COLLECTION_NAME
             },
         },
         "embedder": {
@@ -344,12 +395,35 @@ def add_memory(
 
     user_id = _resolve_user_id(user_id)
 
-    meta = _flatten_metadata(metadata) or {}
-    if tags:
-        meta["tags"] = ",".join(tags)
+    # Normalize tags to list if a string was provided by the client
+    normalized_tags: list[str] | None = None
+    if isinstance(tags, str):
+        normalized_tags = [tags]
+    elif isinstance(tags, list):
+        normalized_tags = tags
 
-    result = mem0.add(text, user_id=user_id, metadata=meta if meta else None)
+    meta = _flatten_metadata(metadata) or {}
+    if normalized_tags:
+        meta["tags"] = ",".join(normalized_tags)
+
+    result = mem0.add(
+        text,
+        user_id=user_id,
+        metadata=meta if meta else None,
+        infer=MEM0_INFER
+    )
     clean = json.loads(json.dumps(result, default=str))
+
+    # Se infer=True retornou results vazio, tenta novamente com infer=False
+    # Isso acontece quando o LLM decide que não há informação relevante
+    if MEM0_INFER and isinstance(clean.get("results"), list) and not clean["results"]:
+        result = mem0.add(
+            text,
+            user_id=user_id,
+            metadata=meta if meta else None,
+            infer=False
+        )
+        clean = json.loads(json.dumps(result, default=str))
 
     # Normalize id for clients that expect a flat payload
     if isinstance(clean, dict) and "id" not in clean:
@@ -493,7 +567,7 @@ def list_all_user_ids() -> dict:
     try:
         # Acessa o vector store interno do Mem0 ao invés de criar nova instância
         vector_store = mem0.vector_store
-        collection = vector_store.client.get_collection("mem0_local")
+        collection = vector_store.client.get_collection(CHROMA_COLLECTION_NAME)
         results = collection.get(include=['metadatas'])
 
         # Count by user_id
@@ -592,8 +666,14 @@ def add_plan(
     if expanded_tags:
         metadata["tags"] = ",".join(expanded_tags)
 
-    result = mem0.add(title, user_id=user_id, metadata=metadata)
+    result = mem0.add(title, user_id=user_id, metadata=metadata, infer=MEM0_INFER)
     clean = json.loads(json.dumps(result, default=str))
+
+    # Se infer=True retornou results vazio, tenta novamente com infer=False
+    if MEM0_INFER and isinstance(clean.get("results"), list) and not clean["results"]:
+        result = mem0.add(title, user_id=user_id, metadata=metadata, infer=False)
+        clean = json.loads(json.dumps(result, default=str))
+
     new_id = _extract_id_from_mem0(clean)
     normalized = _normalize_plan_memory({"id": new_id, "memory": title, "metadata": metadata})
 
@@ -852,7 +932,18 @@ def add_programming_rule(
 
     # Verifica duplicatas se solicitado
     if check_duplicates:
-        similar = mem0.search(rule_text, user_id=user_id, limit=1)
+        # Busca apenas em regras de programação da mesma linguagem e categoria
+        duplicate_filters = {
+            "rule_type": "programming_rule",
+            "language": language.lower(),
+            "category": category
+        }
+        similar = mem0.search(
+            rule_text,
+            user_id=user_id,
+            filters=duplicate_filters,
+            limit=1
+        )
         items = similar.get("results", similar) if isinstance(similar, dict) else similar
         if items and len(items) > 0 and float(items[0].get("score", 0)) > 0.95:
             return {
@@ -905,8 +996,13 @@ def add_programming_rule(
     metadata["tags"] = ",".join(expanded_tags)
 
     # Adiciona a regra
-    result = mem0.add(rule_text, user_id=user_id, metadata=metadata)
+    result = mem0.add(rule_text, user_id=user_id, metadata=metadata, infer=MEM0_INFER)
     clean = json.loads(json.dumps(result, default=str))
+
+    # Se infer=True retornou results vazio, tenta novamente com infer=False
+    if MEM0_INFER and isinstance(clean.get("results"), list) and not clean["results"]:
+        result = mem0.add(rule_text, user_id=user_id, metadata=metadata, infer=False)
+        clean = json.loads(json.dumps(result, default=str))
 
     # Normaliza id
     if isinstance(clean, dict) and "id" not in clean:
@@ -1190,7 +1286,8 @@ async def test_add(text: str, user_id: str = DEFAULT_USER_ID, tags: str | None =
     item = mem0.add(
         text,
         user_id=resolved_user_id,
-        metadata=meta
+        metadata=meta,
+        infer=MEM0_INFER
     )
     return json.loads(json.dumps(item, default=str))
 
@@ -1268,7 +1365,8 @@ async def test_add_json(payload: AddPayload):
     item = mem0.add(
         payload.text,
         user_id=resolved_user_id,
-        metadata=meta if meta else None
+        metadata=meta if meta else None,
+        infer=MEM0_INFER
     )
     return json.loads(json.dumps(item, default=str))
 

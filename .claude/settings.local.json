@@ -12,7 +12,16 @@
       "Bash(source .venv/bin/activate)",
       "Bash(timeout 5 python:*)",
       "Bash(python3:*)",
-      "mcp__mem0-lite__search_rules"
+      "mcp__mem0-lite__search_rules",
+      "mcp__mem0-lite__list_llm_options",
+      "mcp__mem0-lite__add_plan",
+      "mcp__mem0-lite__list_plans",
+      "mcp__mem0-lite__get_plan",
+      "mcp__mem0-lite__add_plan_item",
+      "mcp__mem0-lite__update_plan_item",
+      "mcp__mem0-lite__delete_plan",
+      "mcp__mem0-lite__add_programming_rule",
+      "mcp__mem0-lite__change_llm_config"
     ],
     "deny": [],
     "ask": []
