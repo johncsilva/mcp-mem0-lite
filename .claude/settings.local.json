@@ -21,7 +21,8 @@
       "mcp__mem0-lite__update_plan_item",
       "mcp__mem0-lite__delete_plan",
       "mcp__mem0-lite__add_programming_rule",
-      "mcp__mem0-lite__change_llm_config"
+      "mcp__mem0-lite__change_llm_config",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "ask": []

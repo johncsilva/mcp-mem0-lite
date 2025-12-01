@@ -1,0 +1,20 @@
+[debug] [2025-12-01T11:54:29.660Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2025-12-01T11:54:29.662Z] > authorizing via signed-in user (john@synapse.org.br)
+[debug] [2025-12-01T11:54:29.674Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2025-12-01T11:54:29.674Z] > authorizing via signed-in user (john@synapse.org.br)
+[debug] [2025-12-01T11:54:29.893Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2025-12-01T11:54:29.894Z] > authorizing via signed-in user (john@synapse.org.br)
+[debug] [2025-12-01T11:54:29.896Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2025-12-01T11:54:29.896Z] > authorizing via signed-in user (john@synapse.org.br)
+[debug] [2025-12-01T11:54:29.971Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2025-12-01T11:54:29.971Z] > authorizing via signed-in user (john@synapse.org.br)
+[debug] [2025-12-01T11:54:29.972Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2025-12-01T11:54:29.973Z] > authorizing via signed-in user (john@synapse.org.br)
+[debug] [2025-12-01T12:14:23.702Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2025-12-01T12:14:23.706Z] > authorizing via signed-in user (john@synapse.org.br)
+[debug] [2025-12-01T12:14:23.905Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2025-12-01T12:14:23.905Z] > authorizing via signed-in user (john@synapse.org.br)
+[debug] [2025-12-01T12:14:24.248Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2025-12-01T12:14:24.249Z] > authorizing via signed-in user (john@synapse.org.br)
+[debug] [2025-12-01T12:14:24.250Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2025-12-01T12:14:24.251Z] > authorizing via signed-in user (john@synapse.org.br)

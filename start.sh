@@ -13,20 +13,26 @@ fi
 # Ativa venv e inicia servidor
 cd "$(dirname "$0")"
 source .venv/bin/activate
-nohup python server.py > server.log 2>&1 &
+FORCE_HTTP_MODE=true nohup python server.py > server.log 2>&1 &
+SERVER_PID=$!
+echo "Servidor iniciado com PID: $SERVER_PID"
 
 # Aguarda inicialização
-sleep 3
+sleep 5
 
 # Verifica se iniciou
-if curl -s http://127.0.0.1:8050/ > /dev/null; then
+echo "Testando conectividade..."
+RESPONSE=$(curl -s --max-time 5 http://127.0.0.1:8050/ 2>/dev/null)
+if [ $? -eq 0 ] && echo "$RESPONSE" | grep -q "running"; then
     echo "✅ Servidor iniciado com sucesso!"
     echo "📍 URL: http://127.0.0.1:8050"
     echo "📍 MCP: http://127.0.0.1:8050/mcp/sse"
     echo "📋 PID: $(pgrep -f 'python.*server.py')"
 else
     echo "❌ Erro ao iniciar servidor"
+    echo "📋 Código de saída do curl: $?"
+    echo "📋 Resposta recebida: ${#RESPONSE} caracteres"
     echo "📋 Últimas linhas do log:"
-    tail -20 server.log
+    tail -20 server.log 2>/dev/null || echo "Log vazio"
     exit 1
 fi

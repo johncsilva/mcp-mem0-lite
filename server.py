@@ -1,5 +1,6 @@
 import os
 import json
+import os
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -1504,7 +1505,9 @@ if __name__ == "__main__":
 
     # Detecta se está sendo chamado via stdio (Claude Desktop) ou SSE (servidor standalone)
     # Quando Claude Desktop chama, sys.stdin é um pipe, não um terminal
-    if not sys.stdin.isatty():
+    # Permite forçar modo HTTP via variável de ambiente
+    force_http = os.getenv("FORCE_HTTP_MODE", "false").lower() == "true"
+    if not sys.stdin.isatty() and not force_http:
         # Modo stdio para Claude Desktop - usa FastMCP diretamente
         mcp.run()
     else:
